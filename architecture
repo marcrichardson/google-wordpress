@@ -99,9 +99,7 @@ curl 35.194.111.203
 If you wanted to test the auto-scaling, you could use Apache Benchmark
 or some other tool to drive up HTTP requests.  This should cause the
 VM instance to hit the CPU metric, and cause the autoscale group to
-add more instances.  This probably won't work now, as I don't think
-the request to the Load Balancer IP is actually getting to the backend
-VMs.
+add more instances.  
 
 I did not go through the above exercise, as I ran out of time...
 
