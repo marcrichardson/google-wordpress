@@ -1,0 +1,110 @@
+For this project I would use Terraform to build the infrastructure.
+This would allow it to be immutable, if we want to periodically
+rebuild systems, or scale this beyond two regions.   
+
+I would begin with setting up a database, a google cloud SQL
+instance.  Cloud SQL is pretty performant for a simple webserver, and
+we would not need larger sized instance.  Indeed, most of what I have
+read suggests MySql is the best choice for Wordpress installations.
+
+I would use some terraform modules to create the database.  Modules
+can be used to prompt for a password string, such that the default
+user password is kept out of the code base.  This is an example of
+this:
+https://github.com/terraform-google-modules/terraform-google-sql-db/blob/master/modules/mssql/variables.tf#L183-L187
+
+Once the database instance is created, we would need to install a
+Wordpress database.  Using remote-exec is a way to have terraform run
+commands after an instance is created.  We'd need a remote exec
+function doing something like this:
+
+create database wordpress;
+grant usage on *.* to wpuser@localhost identified by 'Hippi3Pik3r5Ha1rDr';
+grant usage on *.* to wpuser@'%' identified by 'Hippi3Pik3r5Ha1rDr';
+grant all privileges on wordpress.* to wpuser@localhost;
+GRANT ALL PRIVILEGES ON `wordpress`.* TO 'wpuser'@'%';
+
+If this Terraform code is in a Git repo, the secrets would be in
+there, which is unfortunate.  I would probably encrypt this module
+before putting it in git.  Then the user would decrypt using ccrypt,
+ansible-vault, or some other file encryption program before running
+the terraform.  That would keep unencrypted secrets out of your repo.
+
+Next, I would use Terraform to create an
+autoscale group.  I would begin by creating an Instance Template.
+This is a template that can used to create similar instances.  Using
+the default N1-standard-1 would be sufficient for this use case.  An
+instance template can specify a startup script that is used to
+configure the instance.  I would add the following to the startup
+script to install wordpress via the wordpress CLI:
+
+
+sudo mkdir /wordpress && sudo chmod 777 /wordpress && cd /wordpress
+sudo curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+sudo chmod +x wp-cli.phar
+sudo mv wp-cli.phar /usr/local/bin/wp
+sudo apt-get install -y php mysql-client php-mysql
+DEBIAN_FRONTEND=noninteractive apt-get install postfix
+sudo -u www-data wp core download
+sudo mv /wordpress/wp-config-sample.php /wordpress/wp-config.php
+sed -i s/database_name_here/wordpress/ /wordpress/wp-config.php
+sed -i s/username_here/wpuser/ /wordpress/wp-config.php
+sed -i s/password_here/Hippi3Pik3r5Ha1rDr/ /wordpress/wp-config.php
+sed -i s/localhost/10.117.192.3/ /wordpress/wp-config.php
+sudo -u www-data wp config create --dbname=wordpress --dbuser=wpuser
+sudo -u www-data wp core install --url=wordpress.dev --title="WordPress Dev" --admin_user=wpadmin --admin_password=p@55w0ord! --admin_email=you@myemail.com 
+
+That does put some secrets in your startup-script, which is
+unfortunate.  You can limit access to the project to the smallest set
+of users, so not many would view this.  I can't think of a way to use
+Hashcorp Vault or something within a startup.  It may be possible to
+put the startup-script in cloud storage, and access it via Google KMS,
+per
+https://medium.com/@sachin.d.shinde/secrets-management-in-container-optimized-os-3341d5a2ee79
+That is a bit more complicated, but somewhat better.  
+
+
+I would create one autoscale group in us-west1, a multi-zone group,
+and a second in japan (asia-northeast1).  These are the locations that
+users will be accessing the service from.  
+
+I would add a health check for TCP port 80, so that if a wordpress instance crashes, but the VM is up, a new one will be created.
+
+I would specify that the instance group should be multi-zone, so that
+instances are striped across multiple datacenters in that region.  If
+any one zone was down, we would have instances in other nearby zones.  
+
+I set the minimum count to 2, and the maximum to 10.  I'd imagine that is sufficient for 1 million customers at spike.
+
+Next we'd need to set up a load balancer per
+https://cloud.google.com/iap/docs/load-balancer-howto  If you have
+Premium Tier networking, this can route traffic from a region to
+backends in that same region.  We'd prefer this so that we minimize
+client latency.  
+
+In terraform, we'd add a firewall rule to allow health check traffic from the Google Health Check Ip addresses of 130.211.0.0/22 and 35.191.0.0/16.
+
+We'd reserve a static external IP address.
+
+Then set up the load balancer with the backend service set to our two instance groups.
+
+
+
+At the end, 34.120.129.48:80 should return the apache default page, as 
+curl 34.105.78.62 or
+curl 35.194.111.203 
+(the VM public IP addresses) does.  This is currently working.
+
+
+If you wanted to test the auto-scaling, you could use Apache Benchmark
+or some other tool to drive up HTTP requests.  This should cause the
+VM instance to hit the CPU metric, and cause the autoscale group to
+add more instances.  This probably won't work now, as I don't think
+the request to the Load Balancer IP is actually getting to the backend
+VMs.
+
+I did not go through the above exercise, as I ran out of time...
+
+
+
+
